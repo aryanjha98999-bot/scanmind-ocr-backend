@@ -4,7 +4,6 @@ python-multipart
 pillow
 opencv-python-headless
 numpy
-torch
 transformers==4.46.3
 sentencepiece
-huggingface_hub
+huggingface_hub==0.36.2

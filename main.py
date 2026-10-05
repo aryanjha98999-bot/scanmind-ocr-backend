@@ -96,72 +96,36 @@ line_model = None
 # Model loading
 # ---------------------------------------------------------------------------
 
-def load_ocr_model(model_name: str):
-    """
-    Load a ScanMind TrOCR model.
+LINE_MODEL_REPO = "Aryan98999/scanmind-line-ocr"
 
-    On Render:
-        Models are downloaded automatically from Hugging Face.
+# Render Free: only the Line OCR model is used here.
+# The Word model remains on Hugging Face for future use.
+line_processor = None
+line_model = None
 
-    Local development:
-        The same code can also access the Hugging Face repositories
-        as long as the machine has internet access.
-    """
 
-    if model_name == "line_model":
-        model_path = LINE_MODEL_REPO
+def load_line_model():
+    global line_processor, line_model
 
-    elif model_name == "word_model":
-        model_path = WORD_MODEL_REPO
+    if line_processor is not None and line_model is not None:
+        return line_processor, line_model
 
-    else:
-        raise ValueError(
-            f"Unknown OCR model: {model_name}"
-        )
+    print(f"Loading Line OCR model from: {LINE_MODEL_REPO}")
 
-    print(f"Loading OCR model from: {model_path}")
-
-    processor = TrOCRProcessor.from_pretrained(
-        model_path
+    line_processor = TrOCRProcessor.from_pretrained(
+        LINE_MODEL_REPO
     )
 
-    model = VisionEncoderDecoderModel.from_pretrained(
-        model_path
+    line_model = VisionEncoderDecoderModel.from_pretrained(
+        LINE_MODEL_REPO
     )
 
-    model.to(DEVICE)
-    model.eval()
+    line_model.to(DEVICE)
+    line_model.eval()
 
-    print(f"Loaded OCR model successfully: {model_name}")
-
-    return processor, model
-
-
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-def load_models():
-
-    global word_processor
-    global word_model
-    global line_processor
-    global line_model
-
-    print("Loading ScanMind OCR models...")
-
-    word_processor, word_model = load_ocr_model(
-        "word_model"
-    )
-
-    line_processor, line_model = load_ocr_model(
-        "line_model"
-    )
-
-    print("ScanMind Word OCR model loaded.")
     print("ScanMind Line OCR model loaded.")
-    print("All OCR models ready.")
+
+    return line_processor, line_model
 
 
 # ---------------------------------------------------------------------------
@@ -976,22 +940,22 @@ def segment_lines(image: Image.Image):
 # ---------------------------------------------------------------------------
 
 def recognize_line(image: Image.Image):
+    processor, model = load_line_model()
 
-    pixel_values = line_processor(
+    pixel_values = processor(
         images=image.convert("RGB"),
         return_tensors="pt",
     ).pixel_values.to(DEVICE)
 
     with torch.inference_mode():
-
-        generated_ids = line_model.generate(
+        generated_ids = model.generate(
             pixel_values,
             max_new_tokens=128,
         )
 
-    return line_processor.batch_decode(
+    return processor.batch_decode(
         generated_ids,
-        skip_special_tokens=True
+        skip_special_tokens=True,
     )[0].strip()
 
 
@@ -1001,16 +965,11 @@ def recognize_line(image: Image.Image):
 
 @app.get("/health")
 def health():
-
     return {
         "status": "ok",
         "device": str(DEVICE),
-        "word_model_loaded": (
-            word_model is not None
-        ),
-        "line_model_loaded": (
-            line_model is not None
-        ),
+        "word_model_loaded": False,
+        "line_model_loaded": line_model is not None,
     }
 
 
@@ -1023,134 +982,61 @@ async def run_ocr(
     model_type: str,
     file: UploadFile = File(...),
 ):
-
-    if model_type == "word":
-
-        processor = word_processor
-        model = word_model
-
-    elif model_type == "line":
-
-        processor = line_processor
-        model = line_model
-
-    else:
-
+    # This Render service intentionally supports only the LINE model.
+    if model_type != "line":
         raise HTTPException(
             status_code=400,
-            detail=(
-                "model_type must be "
-                "'word' or 'line'"
-            ),
-        )
-
-    if (
-        processor is None
-        or model is None
-    ):
-
-        raise HTTPException(
-            status_code=503,
-            detail="OCR model is not loaded",
+            detail="This OCR service supports only the 'line' model.",
         )
 
     image_bytes = await file.read()
 
     if not image_bytes:
-
         raise HTTPException(
             status_code=400,
-            detail="Uploaded file is empty"
+            detail="Uploaded file is empty",
         )
 
     try:
-
         image = Image.open(
             BytesIO(image_bytes)
         ).convert("RGB")
-
     except (
         UnidentifiedImageError,
-        OSError
+        OSError,
     ):
-
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Please upload a valid "
-                "image file"
-            ),
+            detail="Please upload a valid image file",
         )
 
     try:
+        # Lazy-load the model on the first handwriting OCR request.
+        load_line_model()
 
-        # ---------------------------------------------------------------
-        # Line OCR
-        # ---------------------------------------------------------------
+        crops = segment_lines(image)
 
-        if model_type == "line":
+        extracted = [
+            recognize_line(crop)
+            for crop in crops
+        ]
 
-            crops = segment_lines(
-                image
-            )
-
-            extracted = [
-                recognize_line(crop)
-                for crop in crops
-            ]
-
-            extracted = [
-                line
-                for line in extracted
-                if line
-            ]
-
-            return {
-                "text": "\n".join(
-                    extracted
-                ),
-                "lines_detected": len(
-                    crops
-                ),
-                "lines_recognized": len(
-                    extracted
-                ),
-                "model": "line",
-                "filename": file.filename,
-            }
-
-        # ---------------------------------------------------------------
-        # Word OCR
-        # ---------------------------------------------------------------
-
-        pixel_values = processor(
-            images=image,
-            return_tensors="pt",
-        ).pixel_values.to(DEVICE)
-
-        with torch.inference_mode():
-
-            generated_ids = model.generate(
-                pixel_values,
-                max_new_tokens=128,
-            )
-
-        text = processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True
-        )[0].strip()
+        extracted = [
+            line
+            for line in extracted
+            if line
+        ]
 
         return {
-            "text": text,
-            "model": "word",
+            "text": "\n".join(extracted),
+            "lines_detected": len(crops),
+            "lines_recognized": len(extracted),
+            "model": "line",
             "filename": file.filename,
         }
 
     except Exception as exc:
-
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"OCR inference failed: {str(exc)}"
-            ),
+            detail=f"OCR inference failed: {str(exc)}",
         ) from exc

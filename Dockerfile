@@ -10,6 +10,11 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 
+# CPU-only PyTorch
+RUN pip install --no-cache-dir \
+    torch==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
